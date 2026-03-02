@@ -230,6 +230,70 @@ class GitBlob(GitObject):
         self.blobdata = data
 
 
+class GitCommit(GitObject):
+    fmt = b"commit"
+
+    def serialize(self):
+        return kvlm_serialize(self.kvlm)
+
+    def deserialize(self, data):
+        self.kvlm = kvlm_parse(data)
+
+    def init(self):
+        self.kvlm = dict()
+
+
+def kvlm_parse(raw, start=0, dct=None):
+    if not dct:
+        dct = dict()
+
+    # Search for the new space and the next newline
+    spc = raw.find(b" ", start)
+    nl = raw.find(b"\n", start)
+
+    if spc < 0 or nl < spc:
+        assert nl == start
+        dct[None] = raw[start + 1 :]
+        return dct
+
+    key = raw[start:spc]
+    end = start
+    while True:
+        end = raw.find(b"\n", end + 1)
+        if raw[end + 1] != ord(" "):
+            break
+
+    value = raw[spc + 1 : end].replace(b"\n ", b"\n")
+
+    if key in dct:
+        if type(dct[key]) == list:
+            dct[key].append(value)
+        else:
+            dct[key] = [dct[key], value]
+    else:
+        dct[key] = value
+
+    return kvlm_parse(raw, start=end + 1, dct=dct)
+
+
+def kvlm_serialize(kvlm):
+    ret = b""
+
+    for k in kvlm.keys():
+        if k == None:
+            continue
+        val = kvlm[k]
+        if type(val) != list:
+            val = [val]
+
+        for v in val:
+            ret += k + b" " + (v.replace(b"\n", b"\n ")) + b"\n"
+
+    ret += b"\n" + kvlm[None]
+
+    return ret
+
+
 argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
