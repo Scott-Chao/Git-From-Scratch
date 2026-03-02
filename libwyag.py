@@ -294,6 +294,76 @@ def kvlm_serialize(kvlm):
     return ret
 
 
+class GitTreeLeaf(object):
+    def __init__(self, mode, path, sha):
+        self.mode = mode
+        self.path = path
+        self.sha = sha
+
+
+class GitTree(GitObject):
+    fmt = b"tree"
+
+    def serialize(self):
+        return tree_serialize(self)
+
+    def deserialize(self, data):
+        self.items = tree_parse(data)
+
+    def init(self):
+        self.items = list()
+
+
+def tree_parse_one(raw, start=0):
+    # Find the space terminator of the mode
+    x = raw.find(b" ", start)
+    assert x - start == 5 or x - start == 6
+
+    # Read the mode
+    mode = raw[start:x]
+    if len(mode) == 5:
+        mode = b"0" + mode
+
+    # Read the path
+    y = raw.find(b"\x00", x)
+    path = raw[x + 1 : y]
+
+    # Read the SHA
+    raw_sha = int.from_bytes(raw[y + 1 : y + 21], "big")
+    sha = format(raw_sha, "040x")
+    return y + 21, GitTreeLeaf(mode, path.decode("utf8"), sha)
+
+
+def tree_parse(raw):
+    pos = 0
+    max = len(raw)
+    ret = list()
+    while pos < max:
+        pos, data = tree_parse_one(raw, pos)
+        ret.append(data)
+    return ret
+
+
+def tree_leaf_sort_key(leaf):
+    if leaf.mode.startswith(b"4"):
+        return leaf.path + "/"
+    else:
+        return leaf.path
+
+
+def tree_serialize(obj):
+    obj.items.sort(key=tree_leaf_sort_key)
+    ret = b""
+    for i in obj.items:
+        ret += i.mode
+        ret += b" "
+        ret += i.path.encode("utf8")
+        ret += b"\x00"
+        sha = int(i.sha, 16)
+        ret += sha.to_bytes(20, byteorder="big")
+    return ret
+
+
 argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
