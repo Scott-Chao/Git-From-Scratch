@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import configparser
 from datetime import datetime
@@ -8,6 +10,7 @@ import os
 import re
 import sys
 import zlib
+from typing import Optional, List, Dict, Set, Tuple, Any, Union, BinaryIO, Type
 
 try:
     import grp, pwd
@@ -18,11 +21,11 @@ except ModuleNotFoundError:
 class GitRepository(object):
     """A git repository"""
 
-    worktree = None
-    gitdir = None
-    conf = None
+    worktree: str
+    gitdir: str
+    conf: configparser.ConfigParser
 
-    def __init__(self, path, force=False):
+    def __init__(self, path: str, force: bool = False) -> None:
         self.worktree = path
         self.gitdir = os.path.join(path, ".git")
 
@@ -42,11 +45,11 @@ class GitRepository(object):
             if vers != 0:
                 raise Exception(f"Unsupported repositoryformatversion: {vers}")
 
-    def get_path(self, *path):
+    def get_path(self, *path: str) -> str:
         """Compute path under repo's gitdir"""
         return os.path.join(self.gitdir, *path)
 
-    def get_file(self, *path, mkdir=False):
+    def get_file(self, *path: str, mkdir: bool = False) -> Optional[str]:
         """
         Same as get_path, but create dirname(*path) if absent.  For example,
         self.get_file(r, \"refs\", \"remotes\", \"origin\", \"HEAD\") will create
@@ -55,26 +58,27 @@ class GitRepository(object):
 
         if self.get_dir(*path[:-1], mkdir=mkdir):
             return self.get_path(*path)
+        return None
 
-    def get_dir(self, *path, mkdir=False):
+    def get_dir(self, *path: str, mkdir: bool = False) -> Optional[str]:
         """Same as get_path, but mkdir *path if absent if mkdir"""
 
-        path = self.get_path(*path)
+        full_path = self.get_path(*path)
 
-        if os.path.exists(path):
-            if os.path.isdir(path):
-                return path
+        if os.path.exists(full_path):
+            if os.path.isdir(full_path):
+                return full_path
             else:
-                raise Exception(f"Not a directory {path}")
+                raise Exception(f"Not a directory {full_path}")
 
         if mkdir:
-            os.makedirs(path)
-            return path
+            os.makedirs(full_path)
+            return full_path
         else:
             return None
 
     @classmethod
-    def create(cls, path):
+    def create(cls, path: str) -> GitRepository:
         """Create a new repository at path"""
 
         repo = cls(path, True)
@@ -107,7 +111,7 @@ class GitRepository(object):
         return repo
 
     @classmethod
-    def find(cls, path=".", required=True):
+    def find(cls, path: str = ".", required: bool = True) -> Optional[GitRepository]:
         path = os.path.realpath(path)
 
         if os.path.isdir(os.path.join(path, ".git")):
@@ -124,7 +128,7 @@ class GitRepository(object):
         return cls.find(parent, required)
 
     @staticmethod
-    def default_config():
+    def default_config() -> configparser.ConfigParser:
         ret = configparser.ConfigParser()
 
         ret.add_section("core")
@@ -134,10 +138,10 @@ class GitRepository(object):
 
         return ret
 
-    def resolve_ref(self, ref):
+    def resolve_ref(self, ref: str) -> Optional[str]:
         path = self.get_file(ref)
 
-        if not os.path.isfile(path):
+        if not path or not os.path.isfile(path):
             return None
 
         with open(path, "r") as fp:
@@ -147,10 +151,14 @@ class GitRepository(object):
         else:
             return data
 
-    def list_refs(self, path=None):
+    def list_refs(self, path: Optional[str] = None) -> Dict[str, Any]:
         if not path:
             path = self.get_dir("refs")
-        ret = dict()
+
+        if not path:
+            return dict()
+
+        ret: Dict[str, Any] = dict()
 
         for f in sorted(os.listdir(path)):
             can = os.path.join(path, f)
@@ -161,28 +169,26 @@ class GitRepository(object):
 
         return ret
 
-    def create_ref(self, ref_name, sha):
-        with open(self.get_file("refs/" + ref_name), "w") as fp:
-            fp.write(sha + "\n")
+    def create_ref(self, ref_name: str, sha: str) -> None:
+        ref_path = self.get_file("refs/" + ref_name, mkdir=True)
+        if ref_path:
+            with open(ref_path, "w") as fp:
+                fp.write(sha + "\n")
 
-    def resolve_object(self, name):
+    def resolve_object(self, name: str) -> List[str]:
         """
         Resolve name to an object hash in repo.
-        This function is aware of:
-            - the HEAD literal
-            - short and long hashes
-            - tags
-            - branches
-            - remote branches
         """
-        candidates = list()
+        candidates: List[str] = list()
         hashRE = re.compile(r"^[0-9A-Fa-f]{4,40}$")
 
         if not name.strip():
-            return None
+            return candidates
 
         if name == "HEAD":
-            return [self.resolve_ref("HEAD")]
+            resolved = self.resolve_ref("HEAD")
+            if resolved:
+                return [resolved]
 
         if hashRE.match(name):
             name = name.lower()
@@ -208,24 +214,28 @@ class GitRepository(object):
 
         return candidates
 
-    def find_object(self, name, fmt=None, follow=True):
-        sha = self.resolve_object(name)
+    def find_object(
+        self, name: str, fmt: Optional[bytes] = None, follow: bool = True
+    ) -> Optional[str]:
+        sha_list = self.resolve_object(name)
 
-        if not sha:
+        if not sha_list:
             raise Exception(f"No such reference {name}.")
 
-        if len(sha) > 1:
+        if len(sha_list) > 1:
             raise Exception(
-                f"Ambiguous reference {name}: Candidates are:\n - {'\n - '.join(sha)}."
+                f"Ambiguous reference {name}: Candidates are:\n - {'\n - '.join(sha_list)}."
             )
 
-        sha = sha[0]
+        sha = sha_list[0]
 
         if not fmt:
             return sha
 
         while True:
             obj = self.read_object(sha)
+            if not obj:
+                return None
 
             if obj.fmt == fmt:
                 return sha
@@ -234,13 +244,15 @@ class GitRepository(object):
                 return None
 
             if obj.fmt == b"tag":
+                assert isinstance(obj, GitTag)
                 sha = obj.kvlm[b"object"].decode("ascii")
             elif obj.fmt == b"commit" and fmt == b"tree":
+                assert isinstance(obj, GitCommit)
                 sha = obj.kvlm[b"tree"].decode("ascii")
             else:
                 return None
 
-    def read_object(self, sha):
+    def read_object(self, sha: str) -> Optional[GitObject]:
         """
         Read object sha from Git repository repo. Return a
         GitObject whose exact type depends on the object.
@@ -248,7 +260,7 @@ class GitRepository(object):
 
         path = self.get_file("objects", sha[0:2], sha[2:])
 
-        if not os.path.isfile(path):
+        if not path or not os.path.isfile(path):
             return None
 
         with open(path, "rb") as f:
@@ -265,6 +277,7 @@ class GitRepository(object):
                 raise Exception(f"Malformed object {sha}: bad length")
 
             # Pick constructor
+            c: Type[GitObject]
             match fmt:
                 case b"commit":
                     c = GitCommit
@@ -281,13 +294,16 @@ class GitRepository(object):
 
             return c(raw[y + 1 :])
 
-    def log_graphviz(self, sha, seen):
+    def log_graphviz(self, sha: str, seen: Set[str]) -> None:
         if sha in seen:
             return
         seen.add(sha)
 
         commit = self.read_object(sha)
-        message = commit.kvlm[None].decode("utf8").strip()
+        assert isinstance(commit, GitCommit)
+
+        message_bytes: bytes = commit.kvlm[None]
+        message = message_bytes.decode("utf8").strip()
         message = message.replace("\\", "\\\\")
         message = message.replace('"', '\\"')
 
@@ -295,34 +311,37 @@ class GitRepository(object):
             message = message[: message.index("\n")]
 
         print(f'  c_{sha} [label="{sha[0:7]}: {message}"]')
-        assert commit.fmt == b"commit"
 
-        if not b"parent" in commit.kvlm.keys():
+        if b"parent" not in commit.kvlm:
             return
 
         parents = commit.kvlm[b"parent"]
 
-        if type(parents) != list:
+        if not isinstance(parents, list):
             parents = [parents]
 
         for p in parents:
-            p = p.decode("ascii")
-            print(f"  c_{sha} -> c_{p};")
-            self.log_graphviz(p, seen)
+            p_str = p.decode("ascii")
+            print(f"  c_{sha} -> c_{p_str};")
+            self.log_graphviz(p_str, seen)
 
-    def show_ref(self, refs, with_hash=True, prefix=""):
+    def show_ref(
+        self, refs: Dict[str, Any], with_hash: bool = True, prefix: str = ""
+    ) -> None:
         if prefix:
             prefix = prefix + "/"
         for k, v in refs.items():
-            if type(v) == str and with_hash:
+            if isinstance(v, str) and with_hash:
                 print(f"{v} {prefix}{k}")
-            elif type(v) == str:
+            elif isinstance(v, str):
                 print(f"{prefix}{k}")
             else:
                 self.show_ref(v, with_hash=with_hash, prefix=f"{prefix}{k}")
 
-    def create_tag(self, name, ref, create_tag_object=False):
+    def create_tag(self, name: str, ref: str, create_tag_object: bool = False) -> None:
         sha = self.find_object(ref)
+        if not sha:
+            raise Exception(f"Failed to find object {ref}")
 
         if create_tag_object:
             tag = GitTag()
@@ -341,29 +360,24 @@ class GitRepository(object):
 
 
 class GitObject(object):
-    def __init__(self, data=None):
-        if data != None:
+    fmt: bytes
+
+    def __init__(self, data: Optional[bytes] = None) -> None:
+        if data is not None:
             self.deserialize(data)
         else:
             self.init()
 
-    def serialize(self, repo):
-        """
-        This function MUST be implemented by subclasses.
-
-        It must read the object's contents from self.data, a byte string, and
-        do whatever it takes to convert it into a meaningful representation.
-        What exactly that means depend on each subclass
-        """
+    def serialize(self) -> bytes:
         raise Exception("Unimplemented!")
 
-    def deserialize(self, data):
+    def deserialize(self, data: bytes) -> None:
         raise Exception("Unimplemented!")
 
-    def init(self):
+    def init(self) -> None:
         pass
 
-    def write(self, repo=None):
+    def write(self, repo: Optional[GitRepository] = None) -> str:
         # serialize object data
         data = self.serialize()
         # Add header
@@ -373,17 +387,17 @@ class GitObject(object):
 
         if repo:
             path = repo.get_file("objects", sha[0:2], sha[2:], mkdir=True)
-
-            if not os.path.exists(path):
+            if path and not os.path.exists(path):
                 with open(path, "wb") as f:
                     f.write(zlib.compress(result))
 
         return sha
 
     @staticmethod
-    def hash(fd, fmt, repo=None):
+    def hash(fd: BinaryIO, fmt: bytes, repo: Optional[GitRepository] = None) -> str:
         """Hash object, writing it to repo if provided"""
         data = fd.read()
+        obj: GitObject
 
         match fmt:
             case b"commit":
@@ -395,36 +409,43 @@ class GitObject(object):
             case b"blob":
                 obj = GitBlob(data)
             case _:
-                raise Exception(f"Unknown type {fmt}!")
+                raise Exception(f"Unknown type {fmt.decode()}!")
 
         return obj.write(repo)
 
 
 class GitBlob(GitObject):
     fmt = b"blob"
+    blobdata: bytes
 
-    def serialize(self):
+    def serialize(self) -> bytes:
         return self.blobdata
 
-    def deserialize(self, data):
+    def deserialize(self, data: bytes) -> None:
         self.blobdata = data
 
 
 class GitCommit(GitObject):
     fmt = b"commit"
+    kvlm: Dict[Optional[bytes], Any]
 
-    def serialize(self):
+    def serialize(self) -> bytes:
         return self.serialize_kvlm(self.kvlm)
 
-    def deserialize(self, data):
+    def deserialize(self, data: bytes) -> None:
         self.kvlm = self.parse_kvlm(data)
 
-    def init(self):
+    def init(self) -> None:
         self.kvlm = dict()
 
     @classmethod
-    def parse_kvlm(cls, raw, start=0, dct=None):
-        if not dct:
+    def parse_kvlm(
+        cls,
+        raw: bytes,
+        start: int = 0,
+        dct: Optional[Dict[Optional[bytes], Any]] = None,
+    ) -> Dict[Optional[bytes], Any]:
+        if dct is None:
             dct = dict()
 
         # Search for the new space and the next newline
@@ -440,13 +461,13 @@ class GitCommit(GitObject):
         end = start
         while True:
             end = raw.find(b"\n", end + 1)
-            if raw[end + 1] != ord(" "):
+            if raw[end + 1] != ord(b" "):
                 break
 
         value = raw[spc + 1 : end].replace(b"\n ", b"\n")
 
         if key in dct:
-            if type(dct[key]) == list:
+            if isinstance(dct[key], list):
                 dct[key].append(value)
             else:
                 dct[key] = [dct[key], value]
@@ -456,14 +477,14 @@ class GitCommit(GitObject):
         return cls.parse_kvlm(raw, start=end + 1, dct=dct)
 
     @staticmethod
-    def serialize_kvlm(kvlm):
+    def serialize_kvlm(kvlm: Dict[Optional[bytes], Any]) -> bytes:
         ret = b""
 
         for k in kvlm.keys():
-            if k == None:
+            if k is None:
                 continue
             val = kvlm[k]
-            if type(val) != list:
+            if not isinstance(val, list):
                 val = [val]
 
             for v in val:
@@ -475,7 +496,11 @@ class GitCommit(GitObject):
 
 
 class GitTreeLeaf(object):
-    def __init__(self, mode, path, sha):
+    mode: bytes
+    path: str
+    sha: str
+
+    def __init__(self, mode: bytes, path: str, sha: str) -> None:
         self.mode = mode
         self.path = path
         self.sha = sha
@@ -483,18 +508,19 @@ class GitTreeLeaf(object):
 
 class GitTree(GitObject):
     fmt = b"tree"
+    items: List[GitTreeLeaf]
 
-    def serialize(self):
-        return self.serialize_tree(self)
+    def serialize(self) -> bytes:
+        return self.serialize_tree()
 
-    def deserialize(self, data):
+    def deserialize(self, data: bytes) -> None:
         self.items = self.parse_tree(data)
 
-    def init(self):
+    def init(self) -> None:
         self.items = list()
 
     @staticmethod
-    def parse_one(raw, start=0):
+    def parse_one(raw: bytes, start: int = 0) -> Tuple[int, GitTreeLeaf]:
         # Find the space terminator of the mode
         x = raw.find(b" ", start)
         assert x - start == 5 or x - start == 6
@@ -514,16 +540,16 @@ class GitTree(GitObject):
         return y + 21, GitTreeLeaf(mode, path.decode("utf8"), sha)
 
     @classmethod
-    def parse_tree(cls, raw):
+    def parse_tree(cls, raw: bytes) -> List[GitTreeLeaf]:
         pos = 0
-        max = len(raw)
-        ret = list()
-        while pos < max:
+        max_len = len(raw)
+        ret: List[GitTreeLeaf] = list()
+        while pos < max_len:
             pos, data = cls.parse_one(raw, pos)
             ret.append(data)
         return ret
 
-    def serialize_tree(self):
+    def serialize_tree(self) -> bytes:
         self.items.sort(
             key=lambda leaf: (
                 leaf.path + "/" if leaf.mode.startswith(b"4") else leaf.path
@@ -539,42 +565,52 @@ class GitTree(GitObject):
             ret += sha.to_bytes(20, byteorder="big")
         return ret
 
-    def checkout(self, repo, path):
+    def checkout(self, repo: GitRepository, path: str) -> None:
         for item in self.items:
             obj = repo.read_object(item.sha)
+            if not obj:
+                raise Exception(f"Object {item.sha} not found")
+
             dest = os.path.join(path, item.path)
 
             if obj.fmt == b"tree":
+                assert isinstance(obj, GitTree)
                 os.mkdir(dest)
                 obj.checkout(repo, dest)
             elif obj.fmt == b"blob":
+                assert isinstance(obj, GitBlob)
                 with open(dest, "wb") as f:
                     f.write(obj.blobdata)
 
-    def ls(self, repo, recursive=False, prefix=""):
+    def ls(
+        self, repo: GitRepository, recursive: bool = False, prefix: str = ""
+    ) -> None:
         for item in self.items:
             if len(item.mode) == 5:
-                type = item.mode[0:1]
+                type_str = item.mode[0:1]
             else:
-                type = item.mode[0:2]
+                type_str = item.mode[0:2]
 
-            match type:
+            match type_str:
                 case b"04":
-                    type = "tree"
+                    type_str_decoded = "tree"
                 case b"10":
-                    type = "blob"
+                    type_str_decoded = "blob"
                 case b"12":
-                    type = "blob"
+                    type_str_decoded = "blob"
                 case b"16":
-                    type = "commit"
+                    type_str_decoded = "commit"
                 case _:
-                    raise Exception(f"Weird tree leaf mode {item.mode}")
+                    raise Exception(f"Weird tree leaf mode {item.mode!r}")
 
-            if not (recursive and type == "tree"):
+            if not (recursive and type_str_decoded == "tree"):
                 mode = "0" * (6 - len(item.mode)) + item.mode.decode("ascii")
-                print(f"{mode} {type} {item.sha}\t{os.path.join(prefix, item.path)}")
+                print(
+                    f"{mode} {type_str_decoded} {item.sha}\t{os.path.join(prefix, item.path)}"
+                )
             else:
                 obj = repo.read_object(item.sha)
+                assert isinstance(obj, GitTree)
                 obj.ls(repo, recursive, os.path.join(prefix, item.path))
 
 
@@ -582,6 +618,7 @@ class GitTag(GitCommit):
     fmt = b"tag"
 
 
+# CLI definition
 argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
 argsubparsers.required = True
@@ -668,8 +705,11 @@ argsp.add_argument(
 argsp.add_argument("name", help="The name to parse")
 
 
-def main(argv=sys.argv[1:]):
+def main(argv: Optional[List[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
     args = argparser.parse_args(argv)
+
     match args.command:
         case "add":
             cmd_add(args)
@@ -705,29 +745,44 @@ def main(argv=sys.argv[1:]):
             print("Bad command.")
 
 
-def cmd_add(args):
+def cmd_add(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_cat_file(args):
+def cmd_cat_file(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
     sha = repo.find_object(args.object, fmt=args.type.encode())
-    obj = repo.read_object(sha)
-    sys.stdout.buffer.write(obj.serialize())
+    if sha:
+        obj = repo.read_object(sha)
+        if obj:
+            sys.stdout.buffer.write(obj.serialize())
 
 
-def cmd_check_ignore(args):
+def cmd_check_ignore(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_checkout(args):
+def cmd_checkout(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
 
     sha = repo.find_object(args.commit)
+    if not sha:
+        raise Exception(f"Commit {args.commit} not found")
+
     obj = repo.read_object(sha)
+    if not obj:
+        raise Exception("Failed to read object")
 
     if obj.fmt == b"commit":
-        obj = repo.read_object(obj.kvlm[b"tree"].decode("ascii"))
+        assert isinstance(obj, GitCommit)
+        tree_sha = obj.kvlm[b"tree"].decode("ascii")
+        obj = repo.read_object(tree_sha)
+
+    assert isinstance(obj, GitTree)
 
     if os.path.exists(args.path):
         if not os.path.isdir(args.path):
@@ -740,75 +795,91 @@ def cmd_checkout(args):
     obj.checkout(repo, os.path.realpath(args.path))
 
 
-def cmd_commit(args):
+def cmd_commit(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_hash_object(args):
+def cmd_hash_object(args: argparse.Namespace) -> None:
+    repo: Optional[GitRepository] = None
     if args.write:
         repo = GitRepository.find()
-    else:
-        repo = None
 
     with open(args.path, "rb") as fd:
         sha = GitObject.hash(fd, args.type.encode(), repo)
         print(sha)
 
 
-def cmd_init(args):
+def cmd_init(args: argparse.Namespace) -> None:
     GitRepository.create(args.path)
 
 
-def cmd_log(args):
+def cmd_log(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
+
+    sha = repo.find_object(args.commit)
+    if not sha:
+        raise Exception(f"Commit {args.commit} not found")
 
     print("digraph wyaglog{")
     print("  node[shape=rect]")
-    repo.log_graphviz(repo.find_object(args.commit), set())
+    repo.log_graphviz(sha, set())
     print("}")
 
 
-def cmd_ls_files(args):
+def cmd_ls_files(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_ls_tree(args):
+def cmd_ls_tree(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
+
     sha = repo.find_object(args.tree, fmt=b"tree")
-    obj = repo.read_object(sha)
-    obj.ls(repo, args.recursive)
+    if sha:
+        obj = repo.read_object(sha)
+        assert isinstance(obj, GitTree)
+        obj.ls(repo, args.recursive)
 
 
-def cmd_rev_parse(args):
-    if args.type:
-        fmt = args.type.encode()
-    else:
-        fmt = None
-
+def cmd_rev_parse(args: argparse.Namespace) -> None:
+    fmt: Optional[bytes] = args.type.encode() if args.type else None
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
 
     print(repo.find_object(args.name, fmt, follow=True))
 
 
-def cmd_rm(args):
+def cmd_rm(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_show_ref(args):
+def cmd_show_ref(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
+
     refs = repo.list_refs()
     repo.show_ref(refs, prefix="refs")
 
 
-def cmd_status(args):
+def cmd_status(args: argparse.Namespace) -> None:
     pass
 
 
-def cmd_tag(args):
+def cmd_tag(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
+    if not repo:
+        raise Exception("Not in a git repository")
 
     if args.name:
-        repo.create_tag(args.name, args.object, create_tag_object=args.create_tag_object)
+        repo.create_tag(
+            args.name, args.object, create_tag_object=args.create_tag_object
+        )
     else:
         refs = repo.list_refs()
-        repo.show_ref(refs["tags"], with_hash=False)
+        if "tags" in refs:
+            repo.show_ref(refs["tags"], with_hash=False)
