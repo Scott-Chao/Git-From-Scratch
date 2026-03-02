@@ -521,8 +521,81 @@ def cat_file(repo, obj, fmt=None):
     sys.stdout.buffer.write(obj.serialize())
 
 
+def object_resolve(repo, name):
+    """
+    Resolve name to an object hash in repo.
+    This function is aware of:
+        - the HEAD literal
+        - short and long hashes
+        - tags
+        - branches
+        - remote branches
+    """
+    candidates = list()
+    hashRE = re.compile(r"^[0-9A-Fa-f]{4,40}$")
+
+    if not name.strip():
+        return None
+
+    if name == "HEAD":
+        return [ref_resolve(repo, "HEAD")]
+
+    if hashRE.match(name):
+        name = name.lower()
+        prefix = name[0:2]
+        path = repo_dir(repo, "objects", prefix, mkdir=False)
+        if path:
+            rem = name[2:]
+            for f in os.listdir(path):
+                if f.startswith(rem):
+                    candidates.append(prefix + f)
+
+    as_tag = ref_resolve(repo, "refs/tags/" + name)
+    if as_tag:
+        candidates.append(as_tag)
+
+    as_branch = ref_resolve(repo, "refs/heads/" + name)
+    if as_branch:
+        candidates.append(as_branch)
+
+    as_remote_branch = ref_resolve(repo, "refs/remotes/" + name)
+    if as_remote_branch:
+        candidates.append(as_remote_branch)
+
+    return candidates
+
+
 def object_find(repo, name, fmt=None, follow=True):
-    return name
+    sha = object_resolve(repo, name)
+
+    if not sha:
+        raise Exception(f"No such reference {name}.")
+
+    if len(sha) > 1:
+        raise Exception(
+            f"Ambiguous reference {name}: Candidates are:\n - {'\n - '.join(sha)}."
+        )
+
+    sha = sha[0]
+
+    if not fmt:
+        return sha
+
+    while True:
+        obj = object_read(repo, sha)
+
+        if obj.fmt == fmt:
+            return sha
+
+        if not follow:
+            return None
+
+        if obj.fmt == b"tag":
+            sha = obj.kvlm[b"object"].decode("ascii")
+        elif obj.fmt == b"commit" and fmt == b"tree":
+            sha = obj.kvlm[b"tree"].decode("ascii")
+        else:
+            return None
 
 
 def cmd_check_ignore(args):
