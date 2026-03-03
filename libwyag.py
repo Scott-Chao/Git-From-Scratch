@@ -923,6 +923,92 @@ def check_ignore(rules, path):
     return check_ignore_absolute(rules.absolute, path)
 
 
+def gitconfig_read():
+    xdg_config_home = (
+        os.environ["XDG_CONFIG_HOME"]
+        if "XDG_CONFIG_HOME" in os.environ
+        else "~/.config"
+    )
+    configfiles = [
+        os.path.expanduser(os.path.join(xdg_config_home, "git/config")),
+        os.path.expanduser("~/.gitconfig"),
+    ]
+
+    config = configparser.ConfigParser()
+    config.read(configfiles)
+    return config
+
+
+def gitconfig_user_get(config):
+    if "user" in config:
+        if "name" in config["user"] and "email" in config["user"]:
+            return f"{config['user']['name']} <{config['user']['email']}>"
+    return None
+
+
+def tree_from_index(repo, index):
+    contents = dict()
+    contents[""] = list()
+
+    for entry in index.entries:
+        dirname = os.path.dirname(entry.name)
+
+        key = dirname
+        while key != "":
+            if not key in contents:
+                contents[key] == list()
+            key = os.path.dirname(key)
+
+        contents[dirname].append(entry)
+
+    sorted_paths = sorted(contents.keys(), key=len, reverse=True)
+    sha = None
+
+    for path in sorted_paths:
+        tree = GitTree()
+
+        for entry in contents[path]:
+            if isinstance(entry, GitIndexEntry):
+                leaf_mode = f"{entry.mode_type:02o}{entry.mode_perms:04o}".encode(
+                    "ascii"
+                )
+                leaf = GitTreeLeaf(
+                    mode=leaf_mode, path=os.path.basename(entry.name), sha=entry.sha
+                )
+            else:
+                leaf = GitTreeLeaf(mode=b"040000", path=entry[0], sha=entry[1])
+
+            tree.items.append(leaf)
+
+        sha = tree.write(repo)
+
+        parent = os.path.dirname(path)
+        base = os.path.basename(path)
+        contents[parent].append((base, sha))
+
+    return sha
+
+
+def commit_create(repo, tree, parent, author, timestamp, message):
+    commit = GitCommit()
+    commit.kvlm[b"tree"] = tree.encode("ascii")
+    if parent:
+        commit.kvlm[b"parent"] = parent.encode("ascii")
+
+    message = message.strip() + "\n"
+    offset = int(timestamp.astimezone().utcoffset().total_seconds())
+    hours = offset // 3600
+    minutes = (offset % 3600) // 60
+    tz = "{}{:02}{:02}".format("+" if offset > 0 else "-", hours, minutes)
+
+    author = author + timestamp.strftime(" %s ") + tz
+    commit.kvlm[b"author"] = author.encode("utf8")
+    commit.kvlm[b"committer"] = author.encode("utf8")
+    commit.kvlm[None] = message.encode("utf8")
+
+    return commit.write(repo)
+
+
 # CLI definition
 argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
@@ -1026,6 +1112,14 @@ argsp.add_argument("path", nargs="+", help="Files to remove")
 
 argsp = argsubparsers.add_parser("add", help="Add files contents to the index.")
 argsp.add_argument("path", nargs="+", help="Files to add")
+
+argsp = argsubparsers.add_parser("commit", help="Record changes to the repository.")
+argsp.add_argument(
+    "-m",
+    metavar="message",
+    dest="message",
+    help="Message to associate with this commit.",
+)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -1170,7 +1264,31 @@ def cmd_checkout(args: argparse.Namespace) -> None:
 
 
 def cmd_commit(args: argparse.Namespace) -> None:
-    pass
+    repo = GitRepository.find()
+    index = index_read(repo)
+    tree = tree_from_index(repo, index)
+
+    try:
+        parent = repo.find_object("HEAD")
+    except Exception:
+        parent = None
+
+    commit = commit_create(
+        repo,
+        tree,
+        parent,
+        gitconfig_user_get(gitconfig_read()),
+        datetime.now(),
+        args.message,
+    )
+
+    active_branch = branch_get_active(repo)
+    if active_branch:
+        with open(repo.get_file(os.path.join("refs/heads", active_branch)), "w") as fd:
+            fd.write(commit + "\n")
+    else:
+        with open(repo.get_file("HEAD"), "w") as fd:
+            fd.write("\n")
 
 
 def cmd_hash_object(args: argparse.Namespace) -> None:
