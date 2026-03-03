@@ -1127,6 +1127,77 @@ class GitIgnore(object):
         return False
 
 
+class GitStatus:
+    def __init__(self, repo: GitRepository) -> None:
+        self.repo = repo
+        self.index = GitIndex.read(repo)
+        self.ignore = GitIgnore.build(repo)
+
+    def get_branch_info(self) -> str:
+        branch = self.repo.get_active_branch()
+        if branch:
+            return f"On branch {branch}."
+        else:
+            return f"HEAD detached at {self.repo.find_object('HEAD')}"
+
+    def get_staged_changes(self) -> Dict[str, List[str]]:
+        changes: Dict[str, List[str]] = {"added": [], "modified": [], "deleted": []}
+        head = self.repo.flat_tree("HEAD")
+
+        for entry in self.index.entries:
+            if entry.name in head:
+                if head[entry.name] != entry.sha:
+                    changes["modified"].append(entry.name)
+                del head[entry.name]
+            else:
+                changes["added"].append(entry.name)
+
+        for entry_name in head.keys():
+            changes["deleted"].append(entry_name)
+
+        return changes
+
+    def get_unstaged_and_untracked(self) -> Dict[str, List[str]]:
+        changes: Dict[str, List[str]] = {"modified": [], "deleted": [], "untracked": []}
+
+        gitdir_prefix = self.repo.gitdir + os.path.sep
+
+        all_files: List[str] = list()
+
+        for root, _, files in os.walk(self.repo.worktree, True):
+            if root == self.repo.gitdir or root.startswith(gitdir_prefix):
+                continue
+            for f in files:
+                full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, self.repo.worktree)
+                all_files.append(rel_path)
+
+        for entry in self.index.entries:
+            full_path = os.path.join(self.repo.worktree, entry.name)
+
+            if not os.path.exists(full_path):
+                changes["deleted"].append(entry.name)
+            else:
+                stat = os.stat(full_path)
+
+                ctime_ns = entry.ctime[0] * 10**9 + entry.ctime[1]
+                mtime_ns = entry.mtime[0] * 10**9 + entry.mtime[1]
+                if stat.st_ctime_ns != ctime_ns or stat.st_mtime_ns != mtime_ns:
+                    with open(full_path, "rb") as fd:
+                        new_sha = GitObject.hash(fd, b"blob", None)
+                        if entry.sha != new_sha:
+                            changes["modified"].append(entry.name)
+
+            if entry.name in all_files:
+                all_files.remove(entry.name)
+
+        for f in all_files:
+            if not self.ignore.is_ignored(f):
+                changes["untracked"].append(f)
+
+        return changes
+
+
 # CLI definition
 argparser = argparse.ArgumentParser(description="The stupidest content tracker")
 argsubparsers = argparser.add_subparsers(title="Commands", dest="command")
@@ -1476,79 +1547,32 @@ def cmd_status(args: argparse.Namespace) -> None:
     repo = GitRepository.find()
     if not repo:
         raise Exception("Not in a git repository")
-    index = GitIndex.read(repo)
 
-    cmd_status_branch(repo)
-    cmd_status_head_index(repo, index)
-    print()
-    cmd_status_index_worktree(repo, index)
+    status = GitStatus(repo)
 
+    print(status.get_branch_info())
 
-def cmd_status_branch(repo: GitRepository) -> None:
-    branch = repo.get_active_branch()
-    if branch:
-        print(f"On branch {branch}.")
-    else:
-        print(f"HEAD detached at {repo.find_object('HEAD')}")
-
-
-def cmd_status_head_index(repo: GitRepository, index: GitIndex) -> None:
+    staged = status.get_staged_changes()
     print("Changes to be committed:")
+    for file in staged["added"]:
+        print(f"  added:   {file}")
+    for file in staged["modified"]:
+        print(f"  modified:{file}")
+    for file in staged["deleted"]:
+        print(f"  deleted: {file}")
+    print()
 
-    head = repo.flat_tree("HEAD")
-    for entry in index.entries:
-        if entry.name in head:
-            if head[entry.name] != entry.sha:
-                print("  modified:", entry.name)
-            del head[entry.name]
-        else:
-            print("  added:   ", entry.name)
-
-    for entry_name in head.keys():
-        print("  deleted: ", entry_name)
-
-
-def cmd_status_index_worktree(repo: GitRepository, index: GitIndex) -> None:
+    unstaged = status.get_unstaged_and_untracked()
     print("Changes not staged for commit:")
+    for file in unstaged["modified"]:
+        print(f"  modified:{file}")
+    for file in unstaged["deleted"]:
+        print(f"  deleted: {file}")
+    print()
 
-    ignore = GitIgnore.build(repo)
-
-    gitdir_prefix = repo.gitdir + os.path.sep
-
-    all_files: List[str] = list()
-
-    for root, _, files in os.walk(repo.worktree, True):
-        if root == repo.gitdir or root.startswith(gitdir_prefix):
-            continue
-        for f in files:
-            full_path = os.path.join(root, f)
-            rel_path = os.path.relpath(full_path, repo.worktree)
-            all_files.append(rel_path)
-
-    for entry in index.entries:
-        full_path = os.path.join(repo.worktree, entry.name)
-
-        if not os.path.exists(full_path):
-            print("  deleted: ", entry.name)
-        else:
-            stat = os.stat(full_path)
-
-            ctime_ns = entry.ctime[0] * 10**9 + entry.ctime[1]
-            mtime_ns = entry.mtime[0] * 10**9 + entry.mtime[1]
-            if stat.st_ctime_ns != ctime_ns or stat.st_mtime_ns != mtime_ns:
-                with open(full_path, "rb") as fd:
-                    new_sha = GitObject.hash(fd, b"blob", None)
-                    if entry.sha != new_sha:
-                        print("  modified:", entry.name)
-
-        if entry.name in all_files:
-            all_files.remove(entry.name)
-
-    print("\nUntracked files:")
-
-    for f in all_files:
-        if not ignore.is_ignored(f):
-            print(" ", f)
+    print("Untracked files:")
+    for file in unstaged["untracked"]:
+        print(f"  {file}")
 
 
 def cmd_tag(args: argparse.Namespace) -> None:
