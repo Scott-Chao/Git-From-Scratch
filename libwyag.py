@@ -1024,6 +1024,9 @@ argsp = argsubparsers.add_parser(
 )
 argsp.add_argument("path", nargs="+", help="Files to remove")
 
+argsp = argsubparsers.add_parser("add", help="Add files contents to the index.")
+argsp.add_argument("path", nargs="+", help="Files to add")
+
 
 def main(argv: Optional[List[str]] = None) -> None:
     if argv is None:
@@ -1066,7 +1069,54 @@ def main(argv: Optional[List[str]] = None) -> None:
 
 
 def cmd_add(args: argparse.Namespace) -> None:
-    pass
+    repo = GitRepository.find()
+    add(repo, args.path)
+
+
+def add(repo, paths, delete=True, skip_missing=False):
+    rm(repo, paths, delete=False, skip_missing=True)
+
+    worktree = repo.worktree + os.sep
+
+    clean_paths = set()
+    for path in paths:
+        abspath = os.path.abspath(path)
+        if not (abspath.startswith(worktree) and os.path.isfile(abspath)):
+            raise Exception(f"Not a file, or outside the worktree: {paths}")
+        relpath = os.path.relpath(abspath, repo.worktree)
+        clean_paths.add((abspath, relpath))
+
+    index = index_read(repo)
+
+    for abspath, relpath in clean_paths:
+        with open(abspath, "rb") as fd:
+            sha = GitObject.hash(fd, b"blob", repo)
+
+            stat = os.stat(abspath)
+
+            ctime_s = int(stat.st_ctime)
+            ctime_ns = stat.st_ctime_ns % 10**9
+            mtime_s = int(stat.st_mtime)
+            mtime_ns = stat.st_mtime_ns % 10**9
+
+            entry = GitIndexEntry(
+                ctime=(ctime_s, ctime_ns),
+                mtime=(mtime_s, mtime_ns),
+                dev=stat.st_dev,
+                ino=stat.st_ino,
+                mode_type=0b1000,
+                mode_perms=0o644,
+                uid=stat.st_uid,
+                gid=stat.st_gid,
+                fsize=stat.st_size,
+                sha=sha,
+                flag_assume_valid=False,
+                flag_stage=False,
+                name=relpath,
+            )
+            index.entries.append(entry)
+
+    index_write(repo, index)
 
 
 def cmd_cat_file(args: argparse.Namespace) -> None:
